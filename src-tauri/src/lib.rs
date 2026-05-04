@@ -25,6 +25,25 @@ struct LlmResponse {
     content: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    name: Option<String>,
+    html_url: String,
+    published_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCheck {
+    current_version: String,
+    latest_version: String,
+    update_available: bool,
+    release_url: String,
+    release_name: String,
+    published_at: String,
+}
+
 #[tauri::command]
 fn default_board_path(name: String) -> Result<String, String> {
     let home = env::var("USERPROFILE")
@@ -81,6 +100,56 @@ fn delete_board_file(path: String) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.to_string()),
     }
+}
+
+fn normalize_version(version: &str) -> Vec<u32> {
+    version
+        .trim()
+        .trim_start_matches('v')
+        .split(['.', '-'])
+        .take(3)
+        .map(|part| part.parse::<u32>().unwrap_or(0))
+        .chain(std::iter::repeat(0))
+        .take(3)
+        .collect()
+}
+
+fn is_newer_version(latest: &str, current: &str) -> bool {
+    normalize_version(latest) > normalize_version(current)
+}
+
+#[tauri::command]
+async fn check_for_updates() -> Result<UpdateCheck, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let client = reqwest::Client::new();
+    let release = client
+        .get("https://api.github.com/repos/arvirotechsolutions/Tldraw/releases/latest")
+        .header("User-Agent", "Tldraw update checker")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let status = release.status();
+    let body = release.text().await.map_err(|error| error.to_string())?;
+
+    if !status.is_success() {
+        return Err(format!("GitHub returned {status}: {body}"));
+    }
+
+    let release = serde_json::from_str::<GithubRelease>(&body).map_err(|error| error.to_string())?;
+    let latest_version = release.tag_name.trim_start_matches('v').to_string();
+
+    Ok(UpdateCheck {
+        update_available: is_newer_version(&latest_version, &current_version),
+        release_name: release
+            .name
+            .unwrap_or_else(|| format!("Tldraw {}", release.tag_name)),
+        release_url: release.html_url,
+        published_at: release.published_at.unwrap_or_default(),
+        latest_version,
+        current_version,
+    })
 }
 
 fn join_endpoint(endpoint: &str, path: &str) -> String {
@@ -252,6 +321,7 @@ pub fn run() {
             write_board_file,
             read_board_file,
             delete_board_file,
+            check_for_updates,
             call_llm
         ])
         .run(tauri::generate_context!())

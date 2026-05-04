@@ -1,5 +1,6 @@
 import React, { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
@@ -117,6 +118,15 @@ type StoredAppState = {
   boards: BoardRecord[];
   settings: AppSettings;
   llm: LLMConfig;
+};
+
+type UpdateCheck = {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  releaseUrl: string;
+  releaseName: string;
+  publishedAt: string;
 };
 
 const STORAGE_KEY = 'tldraw-local-app-state';
@@ -1611,6 +1621,33 @@ function SettingsView({ settings, onSave }: { settings: AppSettings; onSave: (se
 }
 
 function UpdatesView() {
+  const [update, setUpdate] = useState<UpdateCheck | null>(null);
+  const [status, setStatus] = useState('Ready to check');
+  const [error, setError] = useState('');
+  const [isChecking, setIsChecking] = useState(false);
+
+  const handleCheckUpdates = async () => {
+    setIsChecking(true);
+    setError('');
+    setStatus('Checking GitHub releases...');
+
+    try {
+      const result = await invoke<UpdateCheck>('check_for_updates');
+      setUpdate(result);
+      setStatus(result.updateAvailable ? `Version ${result.latestVersion} is available` : 'You are up to date');
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : String(caughtError));
+      setStatus('Could not check for updates');
+    } finally {
+      setIsChecking(false);
+    }
+  };
+
+  const handleOpenRelease = async () => {
+    if (!update?.releaseUrl) return;
+    await openUrl(update.releaseUrl);
+  };
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }} className="flex-1 flex flex-col p-12 pr-8 pb-0 min-w-0">
       <div className="mb-10 flex items-center text-[18px] text-black font-medium tracking-tight">Updates</div>
@@ -1624,11 +1661,35 @@ function UpdatesView() {
         </div>
 
         <div className="absolute inset-0 p-8 px-10 flex flex-col justify-center">
-          <h2 className="text-white font-serif-elegant text-[32px] mb-2 tracking-tight transition-transform duration-500 group-hover:translate-x-1">Tldraw is up to date</h2>
-          <p className="text-white/80 text-[15px] mb-6 font-medium tracking-wide transition-transform duration-500 group-hover:translate-x-1">You are currently running version 0.1.0.</p>
+          <h2 className="text-white font-serif-elegant text-[32px] mb-2 tracking-tight transition-transform duration-500 group-hover:translate-x-1">
+            {update?.updateAvailable ? 'A new Tldraw update is available' : update ? 'Tldraw is up to date' : 'Check for Tldraw updates'}
+          </h2>
+          <p className="text-white/80 text-[15px] mb-6 font-medium tracking-wide transition-transform duration-500 group-hover:translate-x-1">
+            {update
+              ? `Current ${update.currentVersion} · Latest ${update.latestVersion}`
+              : 'Updates are published from GitHub Releases.'}
+          </p>
 
-          <button className={`${APP_BUTTON_CLASS} w-fit`}>Check for updates now</button>
+          <div className="flex items-center gap-3">
+            <button onClick={handleCheckUpdates} disabled={isChecking} className={`${APP_BUTTON_CLASS} ${APP_BUTTON_DISABLED_CLASS} w-fit`}>
+              <RefreshCw size={15} className={isChecking ? 'animate-spin' : ''} />
+              {isChecking ? 'Checking...' : 'Check for updates'}
+            </button>
+            {update?.updateAvailable && (
+              <button onClick={handleOpenRelease} className={`${APP_BUTTON_CLASS} w-fit`}>
+                <ArrowRight size={15} />
+                Update now
+              </button>
+            )}
+          </div>
         </div>
+      </div>
+
+      <div className="max-w-3xl rounded-2xl border border-gray-100/80 bg-white p-7 shadow-[0_2px_10px_rgba(0,0,0,0.01)]">
+        <div className="text-[12px] font-bold tracking-[0.1em] uppercase text-[#9ca3af] mb-3">Release status</div>
+        <div className="text-[15px] font-semibold text-black">{status}</div>
+        {update?.releaseName && <div className="mt-2 text-[13.5px] font-medium text-[#6b7280]">{update.releaseName}</div>}
+        {error && <div className="mt-4 rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-[13px] font-medium text-red-700">{error}</div>}
       </div>
     </motion.div>
   );
