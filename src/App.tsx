@@ -424,15 +424,21 @@ export default function App() {
 }
 
 function WindowControls({ appWindow }: { appWindow: ReturnType<typeof getCurrentWindow> }) {
+  const handleWindowAction = (action: () => Promise<void>) => (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    action().catch((error) => console.error('Window action failed', error));
+  };
+
   return (
     <div className="flex items-center h-full pointer-events-auto">
-      <button onClick={() => appWindow.minimize()} className="h-12 w-12 text-gray-600 hover:bg-gray-200/60 hover:text-black transition-all flex items-center justify-center cursor-pointer" title="Minimize">
+      <button type="button" onClick={handleWindowAction(() => appWindow.minimize())} className="h-12 w-12 text-gray-600 hover:bg-gray-200/60 hover:text-black transition-all flex items-center justify-center cursor-pointer" title="Minimize">
         <Minus size={20} strokeWidth={1.5} />
       </button>
-      <button onClick={() => appWindow.toggleMaximize()} className="h-12 w-12 text-gray-600 hover:bg-gray-200/60 hover:text-black transition-all flex items-center justify-center cursor-pointer" title="Maximize">
+      <button type="button" onClick={handleWindowAction(() => appWindow.toggleMaximize())} className="h-12 w-12 text-gray-600 hover:bg-gray-200/60 hover:text-black transition-all flex items-center justify-center cursor-pointer" title="Maximize">
         <Square size={16} strokeWidth={2} />
       </button>
-      <button onClick={() => appWindow.close()} className="h-12 w-[48px] text-gray-600 hover:bg-red-500 hover:text-white transition-all flex items-center justify-center cursor-pointer" title="Close">
+      <button type="button" onClick={handleWindowAction(() => appWindow.close())} className="h-12 w-[48px] text-gray-600 hover:bg-red-500 hover:text-white transition-all flex items-center justify-center cursor-pointer" title="Close">
         <X size={20} strokeWidth={1.5} />
       </button>
     </div>
