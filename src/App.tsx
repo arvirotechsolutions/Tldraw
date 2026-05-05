@@ -1,6 +1,5 @@
 import React, { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { openUrl } from '@tauri-apps/plugin-opener';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
@@ -127,6 +126,14 @@ type UpdateCheck = {
   releaseUrl: string;
   releaseName: string;
   publishedAt: string;
+  installerFileName?: string;
+  installerSize?: number;
+};
+
+type UpdateInstall = {
+  version: string;
+  installerPath: string;
+  installerFileName: string;
 };
 
 const STORAGE_KEY = 'tldraw-local-app-state';
@@ -412,7 +419,7 @@ export default function App() {
 
         <div className="flex-1 bg-white rounded-[24px] shadow-[0_2px_15px_rgba(0,0,0,0.03)] border border-gray-100 flex overflow-hidden">
           <AnimatePresence mode="wait">
-            {activeTab === 'home' && <HomeView key="home" boards={boards} settings={settings} onCreateBoard={handleCreateBoard} onOpenBoard={handleOpenBoard} onRenameBoard={handleRenameBoard} onDeleteBoard={handleDeleteBoard} />}
+            {activeTab === 'home' && <HomeView key="home" boards={boards} settings={settings} onCreateBoard={handleCreateBoard} onOpenBoard={handleOpenBoard} onRenameBoard={handleRenameBoard} onDeleteBoard={handleDeleteBoard} onOpenUpdates={() => setActiveTab('updates')} />}
             {activeTab === 'settings' && <SettingsView key="settings" settings={settings} onSave={setSettings} />}
             {activeTab === 'updates' && <UpdatesView key="updates" />}
             {activeTab === 'llm' && <LLMView key="llm" config={llmConfig} onSave={setLlmConfig} />}
@@ -471,6 +478,7 @@ function HomeView({
   onOpenBoard,
   onRenameBoard,
   onDeleteBoard,
+  onOpenUpdates,
 }: {
   boards: BoardRecord[];
   settings: AppSettings;
@@ -478,10 +486,32 @@ function HomeView({
   onOpenBoard: (board: BoardRecord) => Promise<void>;
   onRenameBoard: (board: BoardRecord, name: string) => Promise<void>;
   onDeleteBoard: (board: BoardRecord, deleteFile: boolean) => Promise<void>;
+  onOpenUpdates: () => void;
 }) {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingBoard, setEditingBoard] = useState<BoardRecord | null>(null);
   const [deletingBoard, setDeletingBoard] = useState<BoardRecord | null>(null);
+  const [availableUpdate, setAvailableUpdate] = useState<UpdateCheck | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    invoke<UpdateCheck>('check_for_updates')
+      .then((result) => {
+        if (isMounted && result.updateAvailable) {
+          setAvailableUpdate(result);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setAvailableUpdate(null);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }} className="flex-1 flex flex-col p-12 pr-8 pb-0 min-w-0">
@@ -492,6 +522,24 @@ function HomeView({
           Create board
         </button>
       </div>
+
+      {availableUpdate && (
+        <button type="button" onClick={onOpenUpdates} className="mb-8 w-full rounded-2xl border border-[#d8e3dd] bg-[#f2f8f4] px-5 py-4 text-left flex items-center justify-between gap-5 transition-colors hover:bg-[#edf5f0] cursor-pointer">
+          <div className="min-w-0 flex items-center gap-4">
+            <div className="h-10 w-10 rounded-xl bg-white text-black flex items-center justify-center shadow-sm shrink-0">
+              <RefreshCw size={18} />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[14px] font-bold text-black">New Tldraw update is available</div>
+              <div className="text-[13px] font-medium text-[#5f6f66] truncate">Version {availableUpdate.latestVersion} is ready to install.</div>
+            </div>
+          </div>
+          <div className="shrink-0 h-9 px-4 rounded-xl bg-black text-white text-[13px] font-bold flex items-center gap-2">
+            Update now
+            <ArrowRight size={14} />
+          </div>
+        </button>
+      )}
 
       <div className="flex-1 flex flex-col relative min-h-0">
         <div className="text-[#9ca3af] text-[12px] font-bold tracking-[0.1em] uppercase mb-4 px-2 shrink-0">Recent Boards</div>
@@ -1631,6 +1679,7 @@ function UpdatesView() {
   const [status, setStatus] = useState('Ready to check');
   const [error, setError] = useState('');
   const [isChecking, setIsChecking] = useState(false);
+  const [isInstalling, setIsInstalling] = useState(false);
 
   const handleCheckUpdates = async () => {
     setIsChecking(true);
@@ -1649,9 +1698,20 @@ function UpdatesView() {
     }
   };
 
-  const handleOpenRelease = async () => {
-    if (!update?.releaseUrl) return;
-    await openUrl(update.releaseUrl);
+  const handleInstallUpdate = async () => {
+    setIsInstalling(true);
+    setError('');
+    setStatus('Downloading installer...');
+
+    try {
+      const result = await invoke<UpdateInstall>('install_update');
+      setStatus(`Starting ${result.installerFileName}`);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : String(caughtError));
+      setStatus('Could not start update');
+    } finally {
+      setIsInstalling(false);
+    }
   };
 
   return (
@@ -1682,9 +1742,9 @@ function UpdatesView() {
               {isChecking ? 'Checking...' : 'Check for updates'}
             </button>
             {update?.updateAvailable && (
-              <button onClick={handleOpenRelease} className={`${APP_BUTTON_CLASS} w-fit`}>
-                <ArrowRight size={15} />
-                Update now
+              <button onClick={handleInstallUpdate} disabled={isInstalling || !update.installerFileName} className={`${APP_BUTTON_CLASS} ${APP_BUTTON_DISABLED_CLASS} w-fit`}>
+                {isInstalling ? <LoaderCircle size={15} className="animate-spin" /> : <ArrowRight size={15} />}
+                {isInstalling ? 'Updating...' : 'Update now'}
               </button>
             )}
           </div>
@@ -1695,6 +1755,7 @@ function UpdatesView() {
         <div className="text-[12px] font-bold tracking-[0.1em] uppercase text-[#9ca3af] mb-3">Release status</div>
         <div className="text-[15px] font-semibold text-black">{status}</div>
         {update?.releaseName && <div className="mt-2 text-[13.5px] font-medium text-[#6b7280]">{update.releaseName}</div>}
+        {update?.updateAvailable && !update.installerFileName && <div className="mt-4 rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-[13px] font-medium text-amber-800">No installer asset was found for this platform.</div>}
         {error && <div className="mt-4 rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-[13px] font-medium text-red-700">{error}</div>}
       </div>
     </motion.div>

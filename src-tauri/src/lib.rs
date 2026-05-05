@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::PathBuf, process::Command, thread, time::Duration};
 
 #[derive(Debug, Deserialize)]
 struct LlmMessage {
@@ -31,6 +31,14 @@ struct GithubRelease {
     name: Option<String>,
     html_url: String,
     published_at: Option<String>,
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -42,6 +50,16 @@ struct UpdateCheck {
     release_url: String,
     release_name: String,
     published_at: String,
+    installer_file_name: Option<String>,
+    installer_size: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInstall {
+    version: String,
+    installer_path: String,
+    installer_file_name: String,
 }
 
 #[tauri::command]
@@ -118,9 +136,7 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
     normalize_version(latest) > normalize_version(current)
 }
 
-#[tauri::command]
-async fn check_for_updates() -> Result<UpdateCheck, String> {
-    let current_version = env!("CARGO_PKG_VERSION").to_string();
+async fn fetch_latest_release() -> Result<GithubRelease, String> {
     let client = reqwest::Client::new();
     let release = client
         .get("https://api.github.com/repos/arvirotechsolutions/Tldraw/releases/latest")
@@ -137,8 +153,133 @@ async fn check_for_updates() -> Result<UpdateCheck, String> {
         return Err(format!("GitHub returned {status}: {body}"));
     }
 
-    let release = serde_json::from_str::<GithubRelease>(&body).map_err(|error| error.to_string())?;
+    serde_json::from_str::<GithubRelease>(&body).map_err(|error| error.to_string())
+}
+
+fn installer_asset_score(name: &str) -> Option<i32> {
+    let lower_name = name.to_lowercase();
+
+    if lower_name.ends_with(".sig")
+        || lower_name.ends_with(".sha256")
+        || lower_name.ends_with(".blockmap")
+        || lower_name.ends_with(".json")
+    {
+        return None;
+    }
+
+    let mut score = if cfg!(target_os = "windows") {
+        if lower_name.ends_with(".msi") {
+            100
+        } else if lower_name.ends_with(".exe") {
+            90
+        } else {
+            return None;
+        }
+    } else if cfg!(target_os = "macos") {
+        if lower_name.ends_with(".dmg") {
+            100
+        } else {
+            return None;
+        }
+    } else if cfg!(target_os = "linux") {
+        if lower_name.ends_with(".appimage") {
+            100
+        } else if lower_name.ends_with(".deb") {
+            90
+        } else if lower_name.ends_with(".rpm") {
+            80
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    if lower_name.contains("x64")
+        || lower_name.contains("x86_64")
+        || lower_name.contains("amd64")
+        || lower_name.contains("win64")
+    {
+        score += 10;
+    }
+
+    Some(score)
+}
+
+fn select_installer_asset(release: &GithubRelease) -> Option<&GithubAsset> {
+    release
+        .assets
+        .iter()
+        .filter_map(|asset| installer_asset_score(&asset.name).map(|score| (score, asset)))
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, asset)| asset)
+}
+
+fn safe_download_file_name(name: &str) -> String {
+    let safe_name = name
+        .chars()
+        .map(|character| match character {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            _ => character,
+        })
+        .collect::<String>()
+        .trim()
+        .trim_matches('.')
+        .to_string();
+
+    if safe_name.is_empty() {
+        "Tldraw-installer".to_string()
+    } else {
+        safe_name
+    }
+}
+
+fn launch_installer(path: &PathBuf) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("msi"))
+        {
+            Command::new("msiexec")
+                .arg("/i")
+                .arg(path)
+                .spawn()
+                .map_err(|error| error.to_string())?;
+        } else {
+            Command::new(path)
+                .spawn()
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn check_for_updates() -> Result<UpdateCheck, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let release = fetch_latest_release().await?;
     let latest_version = release.tag_name.trim_start_matches('v').to_string();
+    let installer_asset =
+        select_installer_asset(&release).map(|asset| (asset.name.clone(), asset.size));
 
     Ok(UpdateCheck {
         update_available: is_newer_version(&latest_version, &current_version),
@@ -147,8 +288,60 @@ async fn check_for_updates() -> Result<UpdateCheck, String> {
             .unwrap_or_else(|| format!("Tldraw {}", release.tag_name)),
         release_url: release.html_url,
         published_at: release.published_at.unwrap_or_default(),
+        installer_file_name: installer_asset
+            .as_ref()
+            .map(|(asset_name, _)| asset_name.clone()),
+        installer_size: installer_asset.map(|(_, asset_size)| asset_size),
         latest_version,
         current_version,
+    })
+}
+
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<UpdateInstall, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let release = fetch_latest_release().await?;
+    let latest_version = release.tag_name.trim_start_matches('v').to_string();
+
+    if !is_newer_version(&latest_version, &current_version) {
+        return Err("Tldraw is already up to date".to_string());
+    }
+
+    let installer_asset = select_installer_asset(&release)
+        .ok_or_else(|| "No installer asset was found for this platform".to_string())?;
+    let file_name = safe_download_file_name(&installer_asset.name);
+    let target_dir = env::temp_dir().join("Tldraw-Updater");
+    fs::create_dir_all(&target_dir).map_err(|error| error.to_string())?;
+    let installer_path = target_dir.join(&file_name);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&installer_asset.browser_download_url)
+        .header("User-Agent", "Tldraw update installer")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Installer download returned {status}: {body}"));
+    }
+
+    let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+    fs::write(&installer_path, bytes).map_err(|error| error.to_string())?;
+    launch_installer(&installer_path)?;
+
+    let app_handle = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(750));
+        app_handle.exit(0);
+    });
+
+    Ok(UpdateInstall {
+        version: latest_version,
+        installer_path: installer_path.to_string_lossy().to_string(),
+        installer_file_name: file_name,
     })
 }
 
@@ -322,6 +515,7 @@ pub fn run() {
             read_board_file,
             delete_board_file,
             check_for_updates,
+            install_update,
             call_llm
         ])
         .run(tauri::generate_context!())
